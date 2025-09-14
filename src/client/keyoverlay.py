@@ -1,6 +1,9 @@
 import sys
 import threading
 from functools import partial
+import subprocess
+import shutil
+import psutil
 
 from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import QEasingCurve
@@ -16,46 +19,89 @@ KEYS = {
 }
 
 
+_GAME_PATTERNS = [
+    
+    "toontownrewritten.exe",
+    "toontown rewritten.exe",
+    "toontown.exe",
+    "toontownrewritten",
+    "toontown rewritten",
+    "ttr",
+    "ttr_client",
+    
+    "corporateclash.exe",
+    "corporateclash_client",
+    "corporate-clash-client",
+]
+
+
 class KeyOverlay(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # Window config: frameless, always on top, translucent
+        
         self.setWindowFlags(
             QtCore.Qt.FramelessWindowHint
             | QtCore.Qt.WindowStaysOnTopHint
             | QtCore.Qt.Tool
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
-        self.setWindowTitle("Key Overlay")
-        self.setFixedSize(420, 140)
+        
+        
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
+        
+        try:
+            self.setWindowFlag(QtCore.Qt.WindowDoesNotAcceptFocus, True)
+        except Exception:
+            pass
+        
+        
+        if sys.platform.startswith("linux"):
+            try:
+                self.setWindowFlag(QtCore.Qt.X11BypassWindowManagerHint, True)
+            except Exception:
+                pass
+        
+        self.setFocusPolicy(QtCore.Qt.NoFocus)
+        
+        self._settings = QtCore.QSettings("SpeedsterTweaks", "KeyOverlay")
+        pos_val = self._settings.value("pos")
+        try:
+            if pos_val and isinstance(pos_val, (list, tuple)) and len(pos_val) >= 2:
+                self.move(int(pos_val[0]), int(pos_val[1]))
+        except Exception:
+            
+            pass
 
-        # Central layout: arrows on top, space bar below
+        
+        self._last_target_geom = None
+
+        
         vmain = QtWidgets.QVBoxLayout()
         vmain.setContentsMargins(12, 12, 12, 12)
         vmain.setSpacing(8)
         self.setLayout(vmain)
 
-        # Top: arrow keys row
+        
         arrows_row = QtWidgets.QHBoxLayout()
         arrows_row.setSpacing(8)
         vmain.addLayout(arrows_row)
 
-        # Bottom: space bar centered
+        
         space_row = QtWidgets.QHBoxLayout()
         space_row.setContentsMargins(0, 6, 0, 0)
         vmain.addLayout(space_row)
 
-        # Create key widgets
+        
         self.key_widgets = {}
-        # store dict entries: lbl -> {"anim": QAbstractAnimation, "glow": QWidget, "shadow": QGraphicsEffect}
+        
         self._animations = {}
 
-        # Arrow sizes
+        
         arrow_size = QtCore.QSize(64, 64)
         space_size = QtCore.QSize(320, 60)
 
-        # Arrow keys order: left, up, down, right
+        
         arrow_order = ["left", "up", "down", "right"]
         for key_name in arrow_order:
             info = KEYS[key_name]
@@ -67,7 +113,7 @@ class KeyOverlay(QtWidgets.QWidget):
             arrows_row.addWidget(lbl)
             self.key_widgets[key_name] = lbl
 
-        # Space bar centered below
+        
         spacer_left = QtWidgets.QSpacerItem(20, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         spacer_right = QtWidgets.QSpacerItem(20, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         space_row.addItem(spacer_left)
@@ -81,13 +127,198 @@ class KeyOverlay(QtWidgets.QWidget):
         space_row.addItem(spacer_right)
         self.key_widgets["space"] = space_lbl
 
-        # Make window draggable (optional)
+        
         self._drag_pos = None
 
-        # Start keyboard listener in background thread
+        
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         self._listener.daemon = True
         self._listener.start()
+
+        
+        self._follow_timer = QtCore.QTimer(self)
+        self._follow_timer.setInterval(500)
+        self._follow_timer.timeout.connect(self._follow_target)
+        self._follow_timer.start()
+
+    def _find_game_window(self):
+        """
+        Try to find a window that belongs to a supported game (Toontown / Corporate Clash).
+        Returns dict {'winid': int, 'geom': QRect, 'title': str} or None.
+
+        Linux: uses wmctrl if available.
+        Windows: uses pywin32 (win32gui/win32process) if available.
+        """
+        
+        if sys.platform.startswith("win"):
+            try:
+                import win32gui, win32process  
+                results = []
+
+                def _cb(hwnd, extra):
+                    try:
+                        if not win32gui.IsWindowVisible(hwnd):
+                            return True
+                        title = (win32gui.GetWindowText(hwnd) or "").lower()
+                        tid, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        try:
+                            proc = psutil.Process(pid)
+                            name = (proc.name() or "").lower()
+                            cmdline = " ".join(proc.cmdline() or []).lower()
+                        except Exception:
+                            name = ""
+                            cmdline = ""
+                        hay = " ".join([name, cmdline, title])
+                        for pat in _GAME_PATTERNS:
+                            if pat in hay:
+                                try:
+                                    l, t, r, b = win32gui.GetWindowRect(hwnd)
+                                    geom = QtCore.QRect(int(l), int(t), int(r - l), int(b - t))
+                                    results.append({"winid": int(hwnd), "geom": geom, "title": win32gui.GetWindowText(hwnd)})
+                                    return True
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    return True
+
+                win32gui.EnumWindows(_cb, None)
+                if results:
+                    return results[0]
+            except Exception:
+                
+                pass
+
+        
+        if sys.platform.startswith("linux"):
+            wmctrl_path = shutil.which("wmctrl")
+            if wmctrl_path:
+                try:
+                    out = subprocess.check_output([wmctrl_path, "-lpG"], stderr=subprocess.DEVNULL).decode(errors="ignore")
+                    for line in out.splitlines():
+                        parts = line.split(None, 8)
+                        if len(parts) < 8:
+                            continue
+                        win_hex = parts[0]
+                        try:
+                            pid = int(parts[2])
+                        except Exception:
+                            continue
+                        try:
+                            x = int(parts[3]); y = int(parts[4]); w = int(parts[5]); h = int(parts[6])
+                        except Exception:
+                            continue
+                        title = parts[8] if len(parts) >= 9 else ""
+                        
+                        try:
+                            proc = psutil.Process(pid)
+                            name = (proc.name() or "").lower()
+                            cmdline = " ".join(proc.cmdline() or []).lower()
+                        except Exception:
+                            name = ""
+                            cmdline = ""
+                        hay = " ".join([name, cmdline, title.lower()])
+                        for pat in _GAME_PATTERNS:
+                            if pat in hay:
+                                try:
+                                    winid = int(win_hex, 16)
+                                except Exception:
+                                    try:
+                                        winid = int(win_hex, 0)
+                                    except Exception:
+                                        winid = None
+                                geom = QtCore.QRect(x, y, w, h)
+                                return {"winid": winid, "geom": geom, "title": title}
+                except Exception:
+                    pass
+        
+        return None
+
+    def _ensure_raised(self):
+        """
+        Try multiple ways to keep the overlay above the target window.
+        Uses Qt raise_(); on Linux tries xdotool/wmctrl; on Windows uses SetWindowPos via pywin32.
+        """
+        try:
+            self.raise_()
+        except Exception:
+            pass
+
+        
+        if sys.platform.startswith("win"):
+            try:
+                import win32gui, win32con  
+                hwnd = int(self.winId())
+                flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+                
+                try:
+                    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        
+        if sys.platform.startswith("linux"):
+            winid = int(self.winId())
+            xdotool_path = shutil.which("xdotool")
+            if xdotool_path:
+                try:
+                    subprocess.Popen([xdotool_path, "windowraise", str(winid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+                except Exception:
+                    pass
+            wmctrl_path = shutil.which("wmctrl")
+            if wmctrl_path:
+                try:
+                    subprocess.Popen([wmctrl_path, "-i", "-r", str(winid), "-b", "add,above"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+                except Exception:
+                    pass
+
+    def _follow_target(self):
+        try:
+            found = self._find_game_window()
+        except Exception:
+            found = None
+
+        if not found:
+            
+            
+            if not self.isVisible():
+                try:
+                    self.show()
+                    self.raise_()
+                except Exception:
+                    pass
+            return
+
+        geom = found["geom"]
+        self._last_target_geom = geom
+
+        
+        if not self.isVisible():
+            try:
+                
+                self.show()
+                self.raise_()
+            except Exception:
+                pass
+
+        
+        target_x = geom.x() + max(0, (geom.width() - self.width()) // 2)
+        target_y = geom.y() + 40  
+        
+        tx = max(geom.x(), min(target_x, geom.right() - self.width()))
+        ty = max(geom.y(), min(target_y, geom.bottom() - self.height()))
+        try:
+            self.move(int(tx), int(ty))
+        except Exception:
+            pass
+
+        
+        try:
+            self._ensure_raised()
+        except Exception:
+            pass
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
@@ -96,12 +327,25 @@ class KeyOverlay(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         if self._drag_pos is not None and event.buttons() & QtCore.Qt.LeftButton:
-            self.move(event.globalPos() - self._drag_pos)
+            
+            pos = event.globalPos() - self._drag_pos
+            self.move(pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         event.accept()
+        
+        try:
+            
+            if self._last_target_geom:
+                g = self._last_target_geom
+                nx = max(g.x(), min(self.x(), g.right() - self.width()))
+                ny = max(g.y(), min(self.y(), g.bottom() - self.height()))
+                self.move(nx, ny)
+            self._settings.setValue("pos", [self.x(), self.y()])
+        except Exception:
+            pass
 
     def _active_style(self, rounded=8, space=False):
         if space:
@@ -152,19 +396,19 @@ class KeyOverlay(QtWidgets.QWidget):
         lbl = self.key_widgets.get(key_name)
         if not lbl:
             return
-        # update style
+        
         is_space = (key_name == "space")
         if active:
             lbl.setStyleSheet(self._active_style(rounded=12 if is_space else 8, space=is_space))
-            # animate press
+            
             self._animate_press(lbl)
         else:
-            # immediately remove any transient visual effects when released
+            
             lbl.setStyleSheet(self._inactive_style(rounded=12 if is_space else 8, space=is_space))
             self._stop_and_cleanup(lbl)
 
     def _set_key_state(self, key_name, active: bool):
-        # Invoked from listener thread; forward to GUI thread
+        
         QtCore.QMetaObject.invokeMethod(
             self,
             "_handle_key_ui",
@@ -174,7 +418,7 @@ class KeyOverlay(QtWidgets.QWidget):
         )
 
     def _matches_space(self, key):
-        # pynput sometimes gives Key.space or KeyCode(char=' ')
+        
         if key == keyboard.Key.space:
             return True
         if hasattr(key, "char") and key.char == " ":
@@ -183,7 +427,7 @@ class KeyOverlay(QtWidgets.QWidget):
 
     def _on_press(self, key):
         for name, info in KEYS.items():
-            # special-case space which may arrive as KeyCode(' ')
+            
             if name == "space":
                 if self._matches_space(key):
                     self._set_key_state(name, True)
@@ -210,29 +454,29 @@ class KeyOverlay(QtWidgets.QWidget):
             return
         anim = entry.get("anim")
         glow = entry.get("glow")
-        # stop animation if running
+        
         try:
             if anim and isinstance(anim, QtCore.QAbstractAnimation) and anim.state() == QtCore.QAbstractAnimation.Running:
                 anim.stop()
         except Exception:
             pass
-        # delete transient glow
+        
         try:
             if glow is not None:
                 glow.deleteLater()
         except Exception:
             pass
-        # remove graphics effect (shadow)
+        
         try:
             lbl.setGraphicsEffect(None)
         except Exception:
             pass
 
     def _animate_press(self, lbl: QtWidgets.QLabel):
-        # ensure previous effects are removed immediately
+        
         self._stop_and_cleanup(lbl)
 
-        # geometry relative to parent
+        
         start_rect = lbl.geometry()
         w = start_rect.width()
         h = start_rect.height()
@@ -240,7 +484,7 @@ class KeyOverlay(QtWidgets.QWidget):
         dy = max(2, int(h * 0.08))
         expanded = QtCore.QRect(start_rect.x() - dx, start_rect.y() - dy, w + dx * 2, h + dy * 2)
 
-        # create transient glow overlay (we animate the glow instead of the label geometry)
+        
         radius = 12 if lbl is self.key_widgets.get("space") else 8
         glow = QtWidgets.QLabel(lbl.parent())
         glow.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
@@ -248,7 +492,7 @@ class KeyOverlay(QtWidgets.QWidget):
         glow.setStyleSheet(f"background: rgba(0,170,255,0.22); border-radius: {radius}px;")
         glow.show()
 
-        # animate glow geometry (pop out and back)
+        
         geom_up = QtCore.QPropertyAnimation(glow, b"geometry")
         geom_up.setDuration(110)
         geom_up.setStartValue(start_rect)
@@ -265,7 +509,7 @@ class KeyOverlay(QtWidgets.QWidget):
         geom_seq.addAnimation(geom_up)
         geom_seq.addAnimation(geom_down)
 
-        # fade out the glow
+        
         glow_anim = QtCore.QPropertyAnimation(glow, b"windowOpacity")
         glow_anim.setDuration(260)
         glow_anim.setStartValue(0.9)
@@ -273,7 +517,7 @@ class KeyOverlay(QtWidgets.QWidget):
         glow_anim.setEndValue(0.0)
         glow_anim.setEasingCurve(QEasingCurve.OutQuad)
 
-        # add a subtle drop-shadow to the label and animate its blur for "pop" feel
+        
         shadow = QtWidgets.QGraphicsDropShadowEffect(lbl)
         shadow.setBlurRadius(0)
         shadow.setColor(QtGui.QColor(0, 170, 255, 200))
@@ -296,20 +540,20 @@ class KeyOverlay(QtWidgets.QWidget):
         shadow_seq.addAnimation(shadow_anim_up)
         shadow_seq.addAnimation(shadow_anim_down)
 
-        # run geom_seq + glow fade + shadow anim in parallel
+        
         group = QtCore.QParallelAnimationGroup(self)
         group.addAnimation(geom_seq)
         group.addAnimation(glow_anim)
         group.addAnimation(shadow_seq)
 
-        # store references so we can stop/cleanup immediately if needed
+        
         self._animations[lbl] = {"anim": group, "glow": glow, "shadow": shadow}
 
-        # cleanup when done (ensures mapping entry removed and transient widget removed)
+        
         def on_finished():
-            # pop entry if still present and ensure removal
+            
             try:
-                # use helper so it behaves the same as immediate cleanup
+                
                 self._stop_and_cleanup(lbl)
             except Exception:
                 pass
@@ -318,15 +562,25 @@ class KeyOverlay(QtWidgets.QWidget):
 
         group.start()
 
+    def closeEvent(self, event):
+        
+        try:
+            self._settings.setValue("pos", [self.x(), self.y()])
+        except Exception:
+            pass
+        super().closeEvent(event)
+
 def main():
     app = QtWidgets.QApplication(sys.argv)
     overlay = KeyOverlay()
-    # Position overlay at top center of primary screen
+    
     screen = app.primaryScreen().availableGeometry()
     x = screen.x() + (screen.width() - overlay.width()) // 2
     y = screen.y() + 40
     overlay.move(x, y)
     overlay.show()
+    
+    overlay.raise_()
     sys.exit(app.exec_())
 
 

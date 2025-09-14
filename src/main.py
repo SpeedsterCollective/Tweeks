@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-"""Detect when Corporate Clash (native or via Wine) or Toontown Rewritten are running.
-
-Usage:
-  python src/main.py --status        # print current status once
-  python src/main.py --watch         # continuously poll and report changes
-
-This script uses `psutil` to inspect processes and `wmctrl` (if available)
-to read window titles for more reliable detection.
-"""
 import argparse
 import subprocess
 import sys
@@ -25,13 +15,13 @@ except Exception:
 
 TARGETS = {
     "Corporate Clash": [
-        # client executable and unique identifiers for the client (not launcher)
+        
         "corporateclash.exe",
         "corporateclash_client",
         "corporate-clash-client",
     ],
     "Toontown Rewritten": [
-        # prefer the actual client exe names
+        
         "toontownrewritten.exe",
         "toontown rewritten.exe",
         "toontown.exe",
@@ -42,7 +32,7 @@ TARGETS = {
     ],
 }
 
-# Common launcher/updater process/window names to ignore
+
 LAUNCHER_NAMES = {
     "launcher",
     "updater",
@@ -70,12 +60,12 @@ def find_windows_for_target(target: str) -> List[str]:
     lines = run_wmctrl_list()
     matches = []
     for line in lines:
-        # wmctrl output: <win id> <desktop> <pid?> <host> <title...>
+        
         parts = line.split(None, 3)
         if len(parts) >= 4:
             title = parts[3]
             low = title.lower()
-            # ignore launcher/update windows
+            
             if any(x in low for x in LAUNCHER_NAMES):
                 continue
             if target.lower() in low:
@@ -86,7 +76,7 @@ def find_windows_for_target(target: str) -> List[str]:
 def extract_version_from_cmdline(cmdline: str) -> str:
     """Try to extract a version string from a process cmdline like --version or -v 1.2.3."""
     import re
-    # common forms: --version=1.2.3, --version 1.2.3, -v 1.2.3
+    
     m = re.search(r"--version(?:=|\s+)([\d\.]+)", cmdline)
     if m:
         return m.group(1)
@@ -111,7 +101,7 @@ def extract_version_from_exe(path: str) -> str:
     try:
         if not path:
             return ""
-        # if exe is a Wine path (inside quotes) try to use basename. If path doesn't exist locally, skip.
+        
         if not os.path.exists(path):
             return ""
         with open(path, "rb") as f:
@@ -120,7 +110,7 @@ def extract_version_from_exe(path: str) -> str:
             read_from = max(0, size - 8192)
             f.seek(read_from)
             data = f.read()
-        # search for ASCII patterns like 1.2.3 or v1.2.3
+        
         import re
         m = re.search(rb"v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", data)
         if m:
@@ -148,40 +138,40 @@ def inspect_processes() -> Dict[str, List[Dict]]:
             lcmd = cmdline.lower()
             lexec = (exe or "").lower()
 
-            # Quick wine process detection
+            
             is_wine_proc = lname in WINE_NAMES or any(w in lcmd for w in WINE_NAMES)
 
-            # If this process is wine and carries an .exe arg, check for exe names inside cmdline
+            
             exe_arg = None
             if ".exe" in lcmd:
-                # find the word containing .exe
+                
                 for part in lcmd.split():
                     if ".exe" in part:
-                        # strip surrounding quotes and normalize path separators
+                        
                         raw = part.strip('"')
-                        # sometimes wine gives full path like C:\path\to\game.exe or /home/.wine/drive_c/.../game.exe
+                        
                         exe_arg = os.path.basename(raw.replace('\\', '/'))
                         exe_arg = exe_arg.lower()
                         break
 
             for target, patterns in TARGETS.items():
-                # ignore obvious launcher processes by name/cmdline
+                
                 if any(x in lname for x in LAUNCHER_NAMES) or any(x in lcmd for x in LAUNCHER_NAMES):
                     continue
 
                 matched = False
                 match_reason = None
 
-                # prefer exact .exe matches (common for Wine)
+                
                 if exe_arg:
                     for p in patterns:
-                        # compare basenames / lowercased
+                        
                         if exe_arg == p.lower() or exe_arg.endswith(p.lower()):
                             matched = True
                             match_reason = f"exe_arg={exe_arg}"
                             break
 
-                # match against exe path, process name, or cmdline as fallback
+                
                 if not matched:
                     hay = " ".join([lname, lcmd, lexec, exe_arg or ""]).lower()
                     for p in patterns:
@@ -191,13 +181,13 @@ def inspect_processes() -> Dict[str, List[Dict]]:
                             break
 
                 if matched:
-                    # determine version: prefer cmdline, then window title, then exe file heuristics
+                    
                     version = None
                     v = extract_version_from_cmdline(cmdline)
                     if v:
                         version = v
                     else:
-                        # check window titles for this target
+                        
                         wins = find_windows_for_target(target)
                         if wins:
                             for w in wins:
@@ -206,7 +196,7 @@ def inspect_processes() -> Dict[str, List[Dict]]:
                                     version = v2
                                     break
                     if not version:
-                        # try exe path heuristic
+                        
                         version = extract_version_from_exe(exe) or None
 
                     results[target].append({
@@ -252,11 +242,11 @@ def get_state(proc_matches: Dict[str, List[Dict]]) -> Dict[str, str]:
     for target in TARGETS:
         matches = proc_matches.get(target, [])
         if not matches:
-            # still check windows in case process detection failed
+            
             wins = find_windows_for_target(target)
             state[target] = "running-window-only" if wins else "not-running"
         else:
-            # if any match is native, prefer native
+            
             if any(not m.get("is_wine") for m in matches):
                 state[target] = "native"
             else:
@@ -273,9 +263,31 @@ def main():
 
     args = parser.parse_args()
 
+    
     if not args.watch and not args.status:
-        parser.print_help()
-        return
+        try:
+            
+            from client.window import main as gui_main  
+        except Exception:
+            try:
+                
+                from window import main as gui_main  
+            except Exception:
+                
+                try:
+                    import importlib.util
+                    gui_path = os.path.join(os.path.dirname(__file__), "client", "window.py")
+                    spec = importlib.util.spec_from_file_location("speedster_window", gui_path)
+                    module = importlib.util.module_from_spec(spec)
+                    assert spec.loader is not None
+                    spec.loader.exec_module(module)
+                    gui_main = getattr(module, "main")
+                except Exception as exc:
+                    print("Failed to import or launch GUI (PyQt5 required):", exc, file=sys.stderr)
+                    parser.print_help()
+                    return
+        
+        return gui_main()
 
     if args.status:
         procs = inspect_processes()
@@ -285,13 +297,13 @@ def main():
                 "state": get_state(procs),
                 "report": format_report(procs),
             }
-            # compact JSON for easy parsing
+            
             print(json.dumps(out))
             return
         print(format_report(procs))
         return
 
-    # watch mode
+    
     last_state = None
     try:
         while True:

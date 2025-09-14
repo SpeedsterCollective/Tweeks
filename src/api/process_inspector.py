@@ -1,6 +1,3 @@
-"""
-Process inspection wrappers that delegate to the main CLI implementation.
-"""
 from typing import Dict, List, Any, Optional
 from .. import main as _main
 

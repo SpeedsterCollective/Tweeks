@@ -1,4 +1,3 @@
-"""Window/title helpers (delegates to main.py implementations)."""
 from typing import List
 from .. import main as _main
 
